@@ -139,14 +139,15 @@ async def send_code(req: SendCodeRequest, request: Request):
 
     async with httpx.AsyncClient() as client:
         resp = await client.get(
-            "https://sms.ru/sms/send",
-            params={
-                "api_id": api_id,
-                "to": phone,
-                "msg": message,
-                "json": 1,
-            },
-        )
+    "https://sms.ru/sms/send",
+    params={
+        "api_id": api_id,
+        "to": phone,
+        "msg": message,
+        "from": "ChisToSpbRU",
+        "json": 1,
+    },
+)
         data = resp.json()
 
     if data.get("status") == "OK":
