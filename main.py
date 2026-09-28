@@ -1,12 +1,12 @@
 """
 Сервер верификации для сайта chisto-tochka-spb.ru
 Использует звонки-авторизацию (Code Call) через sms.ru
-Клиенту звонит робот, клиент вводит последние 4 цифры номера
 """
 
 import time
 import random
 import re
+import ipaddress
 from collections import defaultdict
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,16 +22,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Хранилище кодов: {phone: {"code": "1234", "expires": timestamp}}
 codes = {}
-
-# Лимиты
 ip_requests = defaultdict(list)
 phone_requests = defaultdict(list)
 
-MAX_CALLS_PER_IP = 3       # максимум 3 звонка с одного IP в час
-MAX_CALLS_PER_PHONE = 1    # максимум 1 звонок на номер в час
-CODE_EXPIRE = 300          # код живёт 5 минут (звонок короткий)
+MAX_CALLS_PER_IP = 3
+MAX_CALLS_PER_PHONE = 1
+CODE_EXPIRE = 300
 
 
 class SendCodeRequest(BaseModel):
@@ -46,7 +43,6 @@ class VerifyCodeRequest(BaseModel):
 
 
 def normalize_phone(phone: str) -> str:
-    """Приводим номер к формату 7XXXXXXXXXX"""
     digits = re.sub(r"\D", "", phone)
     if digits.startswith("8") and len(digits) == 11:
         digits = "7" + digits[1:]
@@ -58,7 +54,6 @@ def normalize_phone(phone: str) -> str:
 
 
 def is_valid_phone(phone: str) -> bool:
-    """Проверяем, что номер — российский мобильный"""
     if not phone or len(phone) != 11:
         return False
     if not phone.startswith("7"):
@@ -66,6 +61,35 @@ def is_valid_phone(phone: str) -> bool:
     if phone[1] != "9":
         return False
     return True
+
+
+def is_private_ip(ip_str: str) -> bool:
+    """Проверяем, является ли IP локальным/внутренним"""
+    try:
+        ip = ipaddress.ip_address(ip_str)
+        return ip.is_private or ip.is_loopback or ip.is_link_local
+    except:
+        return True
+
+
+def get_client_ip(request: Request) -> str:
+    """Получаем реальный IP клиента, или -1 если не можем определить"""
+    # Проверяем заголовки прокси
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        ip = forwarded.split(",")[0].strip()
+        if ip and not is_private_ip(ip):
+            return ip
+
+    # Проверяем direct IP
+    if request.client and request.client.host:
+        ip = request.client.host
+        if not is_private_ip(ip):
+            return ip
+
+    # Если IP локальный или не определён — передаём -1
+    # sms.ru требует именно -1 для локальных/серверных IP
+    return "-1"
 
 
 def check_ip_limit(ip: str) -> bool:
@@ -107,8 +131,7 @@ async def send_code(req: SendCodeRequest, request: Request):
         return {"success": False, "error": "Введите корректный номер телефона"}
 
     # Получаем IP клиента
-    forwarded = request.headers.get("x-forwarded-for", "")
-    client_ip = forwarded.split(",")[0].strip() if forwarded else request.client.host
+    client_ip = get_client_ip(request)
 
     # Проверяем лимиты
     if not check_ip_limit(client_ip):
@@ -116,12 +139,12 @@ async def send_code(req: SendCodeRequest, request: Request):
     if not check_phone_limit(phone):
         return {"success": False, "error": "Звонок уже отправлен. Проверьте входящий вызов."}
 
-    # Отправляем звонок через sms.ru Code Call
     import os
     api_id = os.environ.get("SMSRU_API_ID", "")
     if not api_id:
         return {"success": False, "error": "Сервер не настроен"}
 
+    # Отправляем звонок через sms.ru Code Call
     async with httpx.AsyncClient() as client:
         resp = await client.get(
             "https://sms.ru/code/call",
@@ -134,8 +157,9 @@ async def send_code(req: SendCodeRequest, request: Request):
         )
         data = resp.json()
 
+    print(f"[SMS-Verify] sms.ru response: {data}")
+
     if data.get("status") == "OK":
-        # sms.ru возвращает код в поле code
         call_code = str(data.get("code", ""))
         if not call_code:
             return {"success": False, "error": "Ошибка при отправке звонка"}
@@ -143,13 +167,15 @@ async def send_code(req: SendCodeRequest, request: Request):
         codes[phone] = {"code": call_code, "expires": time.time() + CODE_EXPIRE}
         return {"success": True, "message": "Звонок отправлен на номер " + phone}
     else:
-        error_msg = data.get("status_text", "Не удалось позвонить. Проверьте номер.")
+        error_msg = data.get("status_text", "")
+        if not error_msg:
+            error_msg = "Не удалось позвонить. Проверьте номер."
+        print(f"[SMS-Verify] Error from sms.ru: {error_msg}")
         return {"success": False, "error": error_msg}
 
 
 @app.post("/verify-code")
 async def verify_code(req: VerifyCodeRequest):
-    """Проверка кода из звонка"""
     phone = normalize_phone(req.phone)
     if not phone:
         return {"success": False, "error": "Неверный номер"}
