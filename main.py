@@ -26,8 +26,8 @@ codes = {}
 ip_requests = defaultdict(list)
 phone_requests = defaultdict(list)
 
-MAX_SMS_PER_IP = 3
-MAX_SMS_PER_PHONE = 1
+MAX_SMS_PER_IP = 5
+MAX_SMS_PER_PHONE = 3
 CODE_EXPIRE = 600
 
 
