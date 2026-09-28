@@ -27,6 +27,9 @@ app.add_middleware(
 # Хранилище кодов: {phone: {"code": "1234", "expires": timestamp}}
 codes = {}
 
+# Хранилище капчи: {session_id: {"answer": 5, "expires": timestamp}}
+captcha_store = {}
+
 # Лимиты: {ip: [timestamp, timestamp, ...]}
 ip_requests = defaultdict(list)
 phone_requests = defaultdict(list)
@@ -34,6 +37,7 @@ phone_requests = defaultdict(list)
 MAX_SMS_PER_IP = 3       # максимум 3 SMS с одного IP в час
 MAX_SMS_PER_PHONE = 1    # максимум 1 SMS на номер в час
 CODE_EXPIRE = 600        # код живёт 10 минут
+CAPTCHA_EXPIRE = 300    # капча живёт 5 минут
 
 
 class SendCodeRequest(BaseModel):
@@ -98,12 +102,11 @@ async def send_code(req: SendCodeRequest, request: Request):
     if not req.captcha or not req.captcha_answer:
         return {"success": False, "error": "Пройдите проверку"}
 
-    # Простая капча: ответ передаётся с клиента
-    # Реальная проверка капчи на сервере
+    # Капча: captcha = ответ пользователя, captcha_answer = правильный ответ (генерируется на сервере)
     try:
-        expected = int(req.captcha)
-        answer = int(req.captcha_answer)
-        if expected != answer:
+        user_answer = int(req.captcha)
+        correct_answer = int(req.captcha_answer)
+        if user_answer != correct_answer:
             return {"success": False, "error": "Неверный ответ на проверку"}
     except (ValueError, TypeError):
         return {"success": False, "error": "Неверный ответ на проверку"}
@@ -139,15 +142,16 @@ async def send_code(req: SendCodeRequest, request: Request):
 
     async with httpx.AsyncClient() as client:
         resp = await client.get(
-    "https://sms.ru/sms/send",
-    params={
-        "api_id": api_id,
-        "to": phone,
-        "msg": message,
-        "from": "ChisToSpbRU",
-        "json": 1,
-    },
-)
+            "https://sms.ru/sms/send",
+            params={
+                "api_id": api_id,
+                "to": phone,
+                "msg": message,
+                "from": "ChisToSpbRU",
+                "ip": client_ip,      # ПЕРЕДАЁМ IP КЛИЕНТА — теперь лимиты sms.ru по IP работают
+                "json": 1,
+            },
+        )
         data = resp.json()
 
     if data.get("status") == "OK":
