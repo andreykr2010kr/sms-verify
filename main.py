@@ -1,10 +1,12 @@
 """
 Сервер Flash Call верификации для сайта chisto-tochka-spb.ru
 Авторизация звонком через Plusofon Flash Call API
+SMS-fallback через Plusofon SMS API
 """
 
 import time
 import re
+import random
 import ipaddress
 from collections import defaultdict
 from fastapi import FastAPI, Request
@@ -30,9 +32,15 @@ MAX_CALLS_PER_IP = 5
 MAX_CALLS_PER_PHONE = 3
 KEY_EXPIRE = 600
 
+# --- Flash Call API ---
 PLUSOFON_CLIENT_ID = "10553"
 PLUSOFON_ACCESS_TOKEN = os.environ.get("PLUSOFON_ACCESS_TOKEN", "7TdgmHfYczspIaFdtoXh6mZxdBUIwKpX")
 PLUSOFON_API_URL = "https://restapi.plusofon.ru/api/v1/flash-call"
+
+# --- SMS API ---
+PLUSOFON_SMS_TOKEN = os.environ.get("PLUSOFON_SMS_TOKEN", "0yoH3sP6DLGZ9ZO6aIsUvIN5ZmoQGpdq9O74")
+PLUSOFON_SMS_URL = "https://restapi.plusofon.ru/api/v1/sms"
+PLUSOFON_SMS_NUMBER_ID = 147144
 
 
 class SendCallRequest(BaseModel):
@@ -44,6 +52,10 @@ class SendCallRequest(BaseModel):
 class VerifyCallRequest(BaseModel):
     phone: str
     code: str
+
+
+class SendSmsRequest(BaseModel):
+    phone: str
 
 
 def normalize_phone(phone: str) -> str:
@@ -115,6 +127,20 @@ def get_plusofon_headers():
     }
 
 
+def get_sms_headers():
+    return {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Client": PLUSOFON_CLIENT_ID,
+        "Authorization": f"Bearer {PLUSOFON_SMS_TOKEN}",
+    }
+
+
+def generate_code() -> str:
+    return str(random.randint(1000, 9999))
+
+
+# --- Эндпоинт: отправка звонка ---
 @app.post("/send-code")
 async def send_code(req: SendCallRequest, request: Request):
     if not req.captcha or not req.captcha_answer:
@@ -154,7 +180,11 @@ async def send_code(req: SendCallRequest, request: Request):
     resp_data = data.get("data", {})
     if isinstance(resp_data, dict) and "key" in resp_data:
         key = resp_data["key"]
-        call_keys[phone] = {"key": key, "expires": time.time() + KEY_EXPIRE}
+        call_keys[phone] = {
+            "key": key,
+            "expires": time.time() + KEY_EXPIRE,
+            "sms_code": None,
+        }
         return {"success": True, "message": "Звонок отправлен на номер " + phone}
     else:
         error_msg = data.get("message", "Не удалось отправить звонок. Проверьте номер.")
@@ -162,6 +192,51 @@ async def send_code(req: SendCallRequest, request: Request):
         return {"success": False, "error": error_msg}
 
 
+# --- Эндпоинт: SMS-fallback ---
+@app.post("/send-sms")
+async def send_sms(req: SendSmsRequest):
+    phone = normalize_phone(req.phone)
+    if not phone:
+        return {"success": False, "error": "Неверный номер"}
+
+    stored = call_keys.get(phone)
+    if not stored:
+        return {"success": False, "error": "Сначала запросите звонок"}
+
+    if time.time() > stored["expires"]:
+        del call_keys[phone]
+        return {"success": False, "error": "Время истекло. Запросите новый звонок."}
+
+    # Генерируем код и отправляем SMS
+    code = generate_code()
+    stored["sms_code"] = code
+
+    headers = get_sms_headers()
+    sms_body = {
+        "number_id": PLUSOFON_SMS_NUMBER_ID,
+        "text": f"Ваш код подтверждения: {code}",
+        "to": int(phone),
+    }
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            PLUSOFON_SMS_URL,
+            headers=headers,
+            json=sms_body,
+        )
+        data = resp.json()
+
+    print(f"[SMS] Plusofon send response: {data}")
+
+    if data.get("success"):
+        return {"success": True, "message": "SMS отправлена на номер " + phone}
+    else:
+        error_msg = data.get("message", "Не удалось отправить SMS")
+        print(f"[SMS] Error from Plusofon: {error_msg}")
+        return {"success": False, "error": error_msg}
+
+
+# --- Эндпоинт: проверка кода (звонок или SMS) ---
 @app.post("/verify-code")
 async def verify_code(req: VerifyCallRequest):
     phone = normalize_phone(req.phone)
@@ -176,13 +251,24 @@ async def verify_code(req: VerifyCallRequest):
         del call_keys[phone]
         return {"success": False, "error": "Время истекло. Запросите новый звонок."}
 
+    user_code = req.code.strip()
+
+    # Сначала проверяем SMS-код (если был отправлен)
+    if stored.get("sms_code"):
+        if user_code == stored["sms_code"]:
+            del call_keys[phone]
+            return {"success": True, "message": "Номер подтверждён (SMS)"}
+        else:
+            return {"success": False, "error": "Неверный код"}
+
+    # Если SMS не отправлялся — проверяем через Flash Call API
     headers = get_plusofon_headers()
 
     async with httpx.AsyncClient() as client:
         resp = await client.post(
             f"{PLUSOFON_API_URL}/check",
             headers=headers,
-            json={"pin": req.code.strip(), "key": stored["key"]},
+            json={"pin": user_code, "key": stored["key"]},
         )
         data = resp.json()
 
@@ -192,7 +278,6 @@ async def verify_code(req: VerifyCallRequest):
         del call_keys[phone]
         return {"success": True, "message": "Номер подтверждён"}
     else:
-        error_msg = data.get("message", "Неверный код")
         return {"success": False, "error": "Неверный код"}
 
 
