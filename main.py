@@ -22,16 +22,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Хранилище ключей вызова: phone -> {key, expires}
 call_keys = {}
 ip_requests = defaultdict(list)
 phone_requests = defaultdict(list)
 
 MAX_CALLS_PER_IP = 5
 MAX_CALLS_PER_PHONE = 3
-KEY_EXPIRE = 600  # 10 минут
+KEY_EXPIRE = 600
 
-PLUSOFON_CLIENT_ID = os.environ.get("PLUSOFON_CLIENT_ID", "2224")
+PLUSOFON_CLIENT_ID = "10553"
 PLUSOFON_ACCESS_TOKEN = os.environ.get("PLUSOFON_ACCESS_TOKEN", "7TdgmHfYczspIaFdtoXh6mZxdBUIwKpX")
 PLUSOFON_API_URL = "https://restapi.plusofon.ru/api/v1/flash-call"
 
@@ -118,7 +117,6 @@ def get_plusofon_headers():
 
 @app.post("/send-code")
 async def send_code(req: SendCallRequest, request: Request):
-    """Отправка Flash Call через Plusofon API"""
     if not req.captcha or not req.captcha_answer:
         return {"success": False, "error": "Пройдите проверку"}
 
@@ -153,14 +151,13 @@ async def send_code(req: SendCallRequest, request: Request):
 
     print(f"[FlashCall] Plusofon send response: {data}")
 
-    # Plusofon возвращает data.key при успехе
     resp_data = data.get("data", {})
     if isinstance(resp_data, dict) and "key" in resp_data:
         key = resp_data["key"]
         call_keys[phone] = {"key": key, "expires": time.time() + KEY_EXPIRE}
         return {"success": True, "message": "Звонок отправлен на номер " + phone}
     else:
-        error_msg = data.get("message", data.get("error", "Не удалось отправить звонок. Проверьте номер."))
+        error_msg = data.get("message", "Не удалось отправить звонок. Проверьте номер.")
         print(f"[FlashCall] Error from Plusofon: {error_msg}")
         return {"success": False, "error": error_msg}
 
@@ -191,17 +188,11 @@ async def verify_code(req: VerifyCallRequest):
 
     print(f"[FlashCall] Plusofon check response: {data}")
 
-    # Проверяем разные форматы ответа Плюсофона
-    resp_data = data.get("data", {})
-    if (
-        data.get("status") == "OK"
-        or (isinstance(resp_data, dict) and resp_data.get("verified") is True)
-        or data.get("result") is True
-        or (isinstance(resp_data, dict) and resp_data.get("status") == "verified")
-    ):
+    if data.get("success") is True:
         del call_keys[phone]
         return {"success": True, "message": "Номер подтверждён"}
     else:
+        error_msg = data.get("message", "Неверный код")
         return {"success": False, "error": "Неверный код"}
 
 
