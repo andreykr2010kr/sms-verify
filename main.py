@@ -207,7 +207,6 @@ async def send_sms(req: SendSmsRequest):
         del call_keys[phone]
         return {"success": False, "error": "Время истекло. Запросите новый звонок."}
 
-    # Генерируем код и отправляем SMS
     code = generate_code()
     stored["sms_code"] = code
 
@@ -218,6 +217,8 @@ async def send_sms(req: SendSmsRequest):
         "to": int(phone),
     }
 
+    print(f"[SMS] Sending to {phone} | number_id={PLUSOFON_SMS_NUMBER_ID} | token={PLUSOFON_SMS_TOKEN[:10]}...")
+
     async with httpx.AsyncClient() as client:
         resp = await client.post(
             PLUSOFON_SMS_URL,
@@ -226,14 +227,15 @@ async def send_sms(req: SendSmsRequest):
         )
         data = resp.json()
 
-    print(f"[SMS] Plusofon send response: {data}")
+    print(f"[SMS] Plusofon response status: {resp.status_code}")
+    print(f"[SMS] Plusofon response body: {data}")
 
     if data.get("success"):
         return {"success": True, "message": "SMS отправлена на номер " + phone}
     else:
-        error_msg = data.get("message", "Не удалось отправить SMS")
+        error_msg = data.get("message") or data.get("error") or str(data)
         print(f"[SMS] Error from Plusofon: {error_msg}")
-        return {"success": False, "error": error_msg}
+        return {"success": False, "error": "Ошибка SMS: " + error_msg}
 
 
 # --- Эндпоинт: проверка кода (звонок или SMS) ---
